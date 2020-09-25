@@ -9,7 +9,10 @@ package main
 // Please do not change this file.
 //
 
-import "../mr"
+import (
+	"../mr"
+	"log"
+)
 import "time"
 import "os"
 import "fmt"
@@ -26,4 +29,5 @@ func main() {
 	}
 
 	time.Sleep(time.Second)
+	log.Printf("mrmaster existing...")
 }
