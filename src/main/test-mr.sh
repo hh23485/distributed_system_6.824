@@ -201,6 +201,8 @@ timeout -k 2s 180s ../mrworker ../../mrapps/early_exit.so &
 jobs &> /dev/null
 wait -n
 
+echo '-- checkpoint --'
+
 # a process has exited. this means that the output should be finalized
 # otherwise, either a worker or the coordinator exited early
 sort mr-out* | grep . > mr-wc-all-initial
