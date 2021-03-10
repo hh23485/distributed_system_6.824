@@ -8,7 +8,10 @@ package raft
 // test with the original before submitting.
 //
 
-import "testing"
+import (
+	"log"
+	"testing"
+)
 import "fmt"
 import "time"
 import "math/rand"
@@ -61,26 +64,32 @@ func TestReElection2A(t *testing.T) {
 
 	// if the leader disconnects, a new one should be elected.
 	cfg.disconnect(leader1)
+	log.Printf("【TEST】 node %d disconnected", leader1)
 	cfg.checkOneLeader()
 
 	// if the old leader rejoins, that shouldn't
 	// disturb the new leader.
 	cfg.connect(leader1)
+	log.Printf("【TEST】 node %d connected", leader1)
 	leader2 := cfg.checkOneLeader()
 
 	// if there's no quorum, no leader should
 	// be elected.
 	cfg.disconnect(leader2)
+	log.Printf("【TEST】 node %d disconnected", leader2)
 	cfg.disconnect((leader2 + 1) % servers)
+	log.Printf("【TEST】 node %d disconnected", (leader2 + 1) % servers)
 	time.Sleep(2 * RaftElectionTimeout)
 	cfg.checkNoLeader()
 
 	// if a quorum arises, it should elect a leader.
 	cfg.connect((leader2 + 1) % servers)
+	log.Printf("【TEST】 node %d connected", (leader2 + 1) % servers)
 	cfg.checkOneLeader()
 
 	// re-join of last node shouldn't prevent leader from existing.
 	cfg.connect(leader2)
+	log.Printf("【TEST】 node %d connected", leader2)
 	cfg.checkOneLeader()
 
 	cfg.end()
@@ -102,16 +111,22 @@ func TestManyElections2A(t *testing.T) {
 		i2 := rand.Int() % servers
 		i3 := rand.Int() % servers
 		cfg.disconnect(i1)
+		log.Printf("【TEST】 node %d disconnected", i1)
 		cfg.disconnect(i2)
+		log.Printf("【TEST】 node %d disconnected", i2)
 		cfg.disconnect(i3)
+		log.Printf("【TEST】 node %d disconnected", i3)
 
 		// either the current leader should still be alive,
 		// or the remaining four should elect a new one.
 		cfg.checkOneLeader()
 
 		cfg.connect(i1)
+		log.Printf("【TEST】 node %d connected", i1)
 		cfg.connect(i2)
+		log.Printf("【TEST】 node %d connected", i2)
 		cfg.connect(i3)
+		log.Printf("【TEST】 node %d connected", i3)
 	}
 
 	cfg.checkOneLeader()

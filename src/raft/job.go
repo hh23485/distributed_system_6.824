@@ -15,27 +15,25 @@ type VoteJobContext struct {
 	args        *RequestVoteArgs
 	voteResults map[int]*RequestVoteReply
 	succ        bool
-	MaxTerm     int
+	MaxTerm     int32
 	mutex		*sync.Mutex
 }
-//
-//func (v VoteJobContext) IsSucc() bool {
-//	return v.succ
-//}
 
-func RunJobWithTimeLimit(timeoutMilli int64, job func() bool) bool {
+func RunJobWithTimeLimit(timeoutMilli int64, job func() bool) (bool, bool) {
 	timeout := time.Duration(timeoutMilli) * time.Millisecond
 	ctx, _ := context.WithTimeout(context.Background(), timeout)
-	resultChan := make(chan bool)
+	jobFinishChan := make(chan bool)
 
-	go func(ctx context.Context) {
-		resultChan <- job()
-	}(ctx)
+	var jobResult bool
+	go func(ctx context.Context, ret *bool) {
+		jobResult = job()
+		jobFinishChan <- true
+	}(ctx, &jobResult)
 
 	select {
-	case <-resultChan:
-		return true
+	case <-jobFinishChan:
+		return true, jobResult
 	case <-ctx.Done():
-		return false
+		return false, false
 	}
 }

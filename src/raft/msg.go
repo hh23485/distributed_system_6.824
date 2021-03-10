@@ -8,7 +8,7 @@ type RequestVoteArgs struct {
 }
 
 func (r RequestVoteArgs) String() string {
-	return fmt.Sprintf("RequestVoteArgs: [Term: %d], from: %d ", r.Term, r.CandidateId)
+	return fmt.Sprintf("RequestVoteArgs [Term: %d, from node: %d]", r.Term, r.CandidateId)
 }
 
 type RequestVoteReply struct {

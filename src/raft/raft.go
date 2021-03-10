@@ -26,8 +26,8 @@ import (
 
 	//	"6.824/labgob"
 	"6.824/labrpc"
+	uuid "github.com/satori/go.uuid"
 )
-
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -66,22 +66,31 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
-	leader      int
-	votedFor    int
-	currentTerm int
+	leader      int32
+	votedFor    int32
+	currentTerm int32
 
 	role            int // 0 follower, 1 candidate, 2 leader
 	roleChangeMutex sync.Mutex
+	voteMutex       sync.Mutex
+	pingMutex       sync.Mutex
 
 	lastPing time.Time
+	uuid     string
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-	rf.roleChangeMutex.Lock()
-	defer rf.roleChangeMutex.Unlock()
-	return rf.GetStateWithoutLock()
+	return rf.GetCurrentTerm(), rf.GetCurrentLeader() == rf.me
+}
+
+func (rf *Raft) GetCurrentLeader() int {
+	return int(atomic.LoadInt32(&rf.leader))
+}
+
+func (rf *Raft) GetCurrentTerm() int {
+	return int(atomic.LoadInt32(&rf.currentTerm))
 }
 
 //
@@ -170,6 +179,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 //
+
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
@@ -225,25 +235,26 @@ func (rf *Raft) killed() bool {
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
 
-		if _, isLeader := rf.GetState(); !isLeader {
-			if rf.leader == -1 {
-				log.Printf("in term %d, node %d has not leader", rf.currentTerm, rf.me)
+		if currentTerm, isLeader := rf.GetState(); !isLeader {
+			currentLeader := rf.GetCurrentLeader()
+			if currentLeader == -1 {
+				log.Printf("Periodly check, in [term %d], [node %d] has not leader", currentTerm, rf.me)
 			} else {
-				log.Printf("in term %d, node %d 's leader is %d", rf.currentTerm, rf.me, rf.leader)
+				log.Printf("Periodly check, in [term %d], [node %d] 's leader is %d", currentTerm, rf.me, currentLeader)
 			}
 
 			rf.WaitingForTimeout()
 
-			log.Printf("node %d long time no hear from leader %d", rf.me, rf.leader)
+			//log.Printf("in [term %d], [node %d] long time no hear from leader %d", currentTerm, rf.me, rf.leader)
 			//	need a election
 
-			succ := rf.DoElection()
-			log.Printf("election of term %d finished, node %d result is %v", rf.currentTerm, rf.me, succ)
+			rf.DoElection()
+			//currentTerm, _ := rf.GetState()
+			//log.Printf("in [term %d] election finished, [node %d] result is %v, [uuid %s]", currentTerm, rf.me, win, rf.uuid)
 
 		} else {
 			//	send heart beat
 			rf.startSendHeartBeat()
-
 		}
 
 		// Your code here to check if a leader election should
@@ -253,6 +264,8 @@ func (rf *Raft) ticker() {
 		//	检查是否和 leader 通讯良好
 
 	}
+
+	log.Printf("killed raft [node %d], [uuid: %s]", rf.me, rf.uuid)
 }
 
 //
@@ -276,6 +289,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.leader = -1
 	rf.lastPing = time.Now()
+	rf.uuid = uuid.NewV4().String()
+
+	log.Printf("created raft [node %d], [uuid: %s]", rf.me, rf.uuid)
 
 	// Your initialization code here (2A, 2B, 2C).
 
