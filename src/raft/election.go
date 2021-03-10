@@ -12,12 +12,12 @@ var Role_Follower int = 0
 var Role_Candidate int = 1
 var Role_Leader int = 2
 
-var heartBeatTimeout time.Duration = time.Millisecond * 600
-var rpcTimeout time.Duration = time.Millisecond * 100
+var heartBeatTimeout time.Duration = time.Millisecond * 20
+var rpcTimeout time.Duration = time.Millisecond * 5
 
 func (rf *Raft) SetAsLeader() bool {
-	rf.roleChangeMutex.Lock()
-	defer rf.roleChangeMutex.Unlock()
+	rf.statusChangeMutex.Lock()
+	defer rf.statusChangeMutex.Unlock()
 
 	rf.role = Role_Leader
 	atomic.StoreInt32(&rf.votedFor, -1)
@@ -27,13 +27,16 @@ func (rf *Raft) SetAsLeader() bool {
 }
 
 func (rf *Raft) SetAsCandidate() bool {
-	rf.roleChangeMutex.Lock()
-	defer rf.roleChangeMutex.Unlock()
+	rf.statusChangeMutex.Lock()
+	defer rf.statusChangeMutex.Unlock()
 
-	if rf.GetCurrentVotedFor() != -1 {
-		log.Printf("")
+	// if connected, exit election
+	if rf.IsLeaderConnected(false) {
 		return false
 	}
+	//if rf.GetCurrentVotedFor() != -1 {
+	//	return false
+	//}
 
 	rf.role = Role_Candidate
 	rf.UpdateVotedFor(rf.me)
@@ -45,11 +48,16 @@ func (rf *Raft) SetAsCandidate() bool {
 	return true
 }
 
-func (rf *Raft) SetAsFollower(term int, leader int) {
-	rf.roleChangeMutex.Lock()
-	defer rf.roleChangeMutex.Unlock()
+func (rf *Raft) SetAsFollowerWithLock(term int, leader int) {
+	rf.statusChangeMutex.Lock()
+	defer rf.statusChangeMutex.Unlock()
 
-	if term != rf.GetCurrentTerm() && leader != rf.GetCurrentLeader() {
+	if term < rf.GetCurrentTerm() {
+		log.Printf("in [term %d], [node %d] failed to set as follower, target %d less than current term %d", rf.currentTerm, rf.me, rf.GetCurrentTerm(), term)
+		return
+	}
+
+	if term != rf.GetCurrentTerm() || leader != rf.GetCurrentLeader() {
 		log.Printf("in [term %d -> %d], [node %d] begin to be a follower of leader %d ----------------------", rf.currentTerm, term, rf.me, leader)
 	}
 
@@ -60,75 +68,75 @@ func (rf *Raft) SetAsFollower(term int, leader int) {
 }
 
 func (rf *Raft) DoElection() bool {
-	var maxMilli int64 = 1000
-	var minMilli int64 = 100
-	electionTimeoutMilli := GetRandomBetween(minMilli, maxMilli)
-	time.Sleep(time.Duration(electionTimeoutMilli) * time.Millisecond)
+	randTimeBeforeElection := GetRandomBetween(100, 300)
+	time.Sleep(time.Duration(randTimeBeforeElection) * time.Millisecond)
 
-	if rf.IsLeaderConnected() {
+	if rf.IsLeaderConnected(false) {
+		// if find leader, stop election
 		return false
 	}
 
 	if rf.killed() {
+		// if killed, stop election
 		return false
 	}
 
 	log.Printf("in [term %d], [node %d]'s leader %d is disconnected, go on for election", rf.GetCurrentTerm(), rf.me, rf.GetCurrentLeader())
 
-	rf.SetAsCandidate()
+	if !rf.SetAsCandidate() {
+		log.Printf("in [term %d], [node %d] failed to be a candidate, give up current election", rf.GetCurrentTerm(), rf.me)
+		return false
+	}
 
 	currentTerm := rf.GetCurrentTerm()
-	arg := RequestVoteArgs{
+	args := RequestVoteArgs{
 		Term:        currentTerm,
 		CandidateId: rf.me,
 	}
 
 	voteJobCtx := &VoteJobContext{
-		&arg,
+		&args,
 		map[int]*RequestVoteReply{},
-		false,
 		0,
 		&sync.Mutex{},
 	}
 
-	notTimeout, _ := RunJobWithTimeLimit(electionTimeoutMilli, func() bool {
+	electionTimeoutMilli := GetRandomBetween(100, 500)
+	notTimeout, isWin := RunJobWithTimeLimit(electionTimeoutMilli, func() bool {
 		log.Printf("in [term %d], [node %d] start a election *******************", currentTerm, rf.me)
 		reqContext := voteJobCtx
 		waitGroup := sync.WaitGroup{}
-		replyMap := reqContext.voteResults
-
-		//todo cancel initialization
-		for idx, _ := range rf.peers {
-			replyMap[idx] = &RequestVoteReply{
-				arg.Term,
-				false,
-			}
-		}
 
 		// send to all peers in go routes
 		for idx, _ := range rf.peers {
 			waitGroup.Add(1)
 			go func(idx int) {
 				defer waitGroup.Done()
-				reply := replyMap[idx]
 				if idx == rf.me {
-					reqContext.mutex.Lock()
-					defer reqContext.mutex.Unlock()
-					reply.Term = arg.Term
-					reply.VoteGranted = true
+					// lock and set reply
+					reqContext.SetReplyWithLock(idx, &RequestVoteReply{
+						args.Term,
+						true,
+					})
 					return
 				}
 
 				if rf.killed() {
+					// quick return
 					return
 				}
 
 				nTimeout, _ := RunJobWithTimeLimit(rpcTimeout.Milliseconds(), func() bool {
-					return rf.sendRequestVote(idx, reqContext.args, reply)
+					copiedReply := RequestVoteReply{}
+					res := rf.sendRequestVote(idx, reqContext.args, &copiedReply)
+					{
+						reqContext.SetReplyWithLock(idx, &copiedReply)
+					}
+					return res
 				})
 
 				if !nTimeout {
-					log.Printf("[Async] in [term %d], [node %d] sendRequestVote %d -> %d, timeout", arg.Term, rf.me, rf.me, idx)
+					log.Printf("[Async] in [term %d], [node %d] sendRequestVote %d -> %d, timeout", args.Term, rf.me, rf.me, idx)
 				}
 			}(idx)
 		}
@@ -142,10 +150,10 @@ func (rf *Raft) DoElection() bool {
 		totalCount := len(rf.peers)
 		granted := 0
 		maxTerm := 0
-		maxTermPeer := -1
-		for idx, reply := range replyMap {
+		maxTermNode := -1
+		for idx, _ := range rf.peers {
 			// todo reduce lock scope
-			reqContext.mutex.Lock()
+			reply := reqContext.GetReply(idx)
 			if reply == nil {
 				continue
 			}
@@ -154,35 +162,34 @@ func (rf *Raft) DoElection() bool {
 			}
 			if reply.Term > maxTerm {
 				maxTerm = reply.Term
-				maxTermPeer = idx
+				maxTermNode = idx
 			}
-			reqContext.mutex.Unlock()
 		}
 		AtomicStoreInt(&reqContext.MaxTerm, maxTerm)
 
 		// check if meet higher
-		if maxTerm > arg.Term {
-			log.Printf("[Async] in [term %d], candidate %d meet higher term %d from peer %d", arg.Term, rf.me, maxTerm, maxTermPeer)
+		if maxTerm > args.Term {
+			log.Printf("[Async] in [term %d], candidate %d meet higher term %d from peer %d", args.Term, rf.me, maxTerm, maxTermNode)
 			return false
 		}
 
-		reqContext.succ = granted > (totalCount / 2)
-		win := "win"
-		if !reqContext.succ {
-			win = "lose"
+		isWin := granted > (totalCount / 2)
+		result := "win"
+		if !isWin {
+			result = "lose"
 		}
-		log.Printf("[Async] %s the election for candidate %d in [term %d], win %d/%d", win, rf.me, arg.Term, granted, totalCount)
-		return reqContext.succ
+		log.Printf("[Async] %s the election for candidate %d in [term %d], win %d/%d", result, rf.me, args.Term, granted, totalCount)
+		return isWin
 	})
 
 	cCurrentTerm := rf.GetCurrentTerm()
 	if !notTimeout {
-		log.Printf("in [term %d], election for candidate %d, timeout ********************", arg.Term, rf.me)
-	} else if arg.Term < cCurrentTerm {
-		log.Printf("in [term %d], [node %d]'s current term changed to %d during election ********************", arg.Term, rf.me, cCurrentTerm)
+		log.Printf("in [term %d], election for candidate %d, timeout ********************", args.Term, rf.me)
+	} else if args.Term < cCurrentTerm {
+		log.Printf("in [term %d], [node %d]'s current term changed to %d during election ********************", args.Term, rf.me, cCurrentTerm)
 	} else {
 		//	valid
-		if voteJobCtx.succ {
+		if isWin {
 			if rf.SetAsLeader() {
 				log.Printf("in [term %d], [node %d] win the election ********************", cCurrentTerm, rf.me)
 				return true
@@ -192,40 +199,49 @@ func (rf *Raft) DoElection() bool {
 			log.Printf("in [term %d], [node %d] lose the election for candidate ********************", cCurrentTerm, rf.me)
 		}
 	}
-	rf.UpdateVotedFor(-1)
+
+	//rf.UpdateVotedFor(-1)
 	maxTerm := AtomicLoadInt(&voteJobCtx.MaxTerm)
-	if maxTerm > rf.GetCurrentTerm() {
-		rf.SetAsFollower(maxTerm, -1)
-	}
+	nextTerm := Max(maxTerm, rf.GetCurrentTerm())
+	rf.SetAsFollowerWithLock(nextTerm, -1)
+
 	return false
 }
 
-func (rf *Raft) IsLeaderConnected() bool {
-	currentLeader := rf.GetCurrentLeader()
-	if currentLeader == rf.me {
+func (rf *Raft) IsLeaderConnected(verbose bool) bool {
+	rf.pingMutex.Lock()
+	defer rf.pingMutex.Unlock()
+
+	if rf.IsLeader() {
 		return true
 	}
 
 	currentTerm := rf.GetCurrentTerm()
-	timeAfterLastPing := rf.GetDurationSinceLastPing()
-	if timeAfterLastPing > heartBeatTimeout {
-		log.Printf("in [term %d], [node %d] long time no hear from leader %d, timeAfterLastPing: %d millisec", currentTerm, rf.me, rf.leader, timeAfterLastPing.Milliseconds())
+	timeAfterLastPing := time.Now().Sub(rf.lastPing)
+
+	if timeAfterLastPing >= rf.pingTimeout {
+		if verbose {
+			log.Printf("in [term %d], [node %d] long time no hear from leader %d, timeAfterLastPing: %d millisec", currentTerm, rf.me, rf.leader, timeAfterLastPing.Milliseconds())
+		}
 		return false
 	}
+
 	return true
 }
 
-func (rf *Raft) WaitingForTimeout() {
+func (rf *Raft) WaitingForPingTimeout() (isTimeout bool) {
 	for rf.killed() == false {
-		if _, isLeader := rf.GetState(); isLeader {
-			return
+		// if current node is leader, return
+		if rf.IsLeader() {
+			return false
 		}
-		if !rf.IsLeaderConnected() {
-			return
+		if !rf.IsLeaderConnected(true) {
+			return true
 		}
-		sleepMilli := GetRandomBetween(0, heartBeatTimeout.Milliseconds()/2)
-		time.Sleep(time.Duration(sleepMilli) * time.Millisecond)
+		// check a few seconds
+		time.Sleep(1 * time.Millisecond)
 	}
+	return false
 }
 
 func GetRandomBetween(min, max int64) int64 {
@@ -282,7 +298,7 @@ func (rf *Raft) startSendHeartBeat() {
 					log.Printf("in [term %d], [node %d] send heart beat to node %d timeout", cCurrentTerm, rf.me, idx)
 				}
 
-			} (idx)
+			}(idx)
 		}
 		waitGroup.Wait()
 
@@ -296,11 +312,11 @@ func (rf *Raft) startSendHeartBeat() {
 			mapMutex.Lock()
 			if reply.Term > cCurrentTerm {
 				log.Printf("in [term %d], [node %d] send heart beat met higher term from node %d, back to follower", cCurrentTerm, rf.me, idx)
-				rf.SetAsFollower(reply.Term, -1)
+				rf.SetAsFollowerWithLock(reply.Term, -1)
 			}
 			mapMutex.Unlock()
 		}
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
@@ -314,8 +330,8 @@ func (rf *Raft) UpdateTerm(term int) {
 }
 
 //func (rf *Raft) UpdateTermWithLock(term int) {
-//	rf.roleChangeMutex.Lock()
-//	defer rf.roleChangeMutex.Unlock()
+//	rf.statusChangeMutex.Lock()
+//	defer rf.statusChangeMutex.Unlock()
 //	rf.UpdateTerm(term)
 //}
 
@@ -324,14 +340,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if len(args.Entries) == 0 {
 		if currentTerm <= args.Term {
 			// todo load lock
-			rf.SetAsFollower(args.Term, args.LeaderId)
+			rf.SetAsFollowerWithLock(args.Term, args.LeaderId)
 			//rf.heartBeatMutex.Lock()
 			//defer rf.heartBeatMutex.Unlock()
-			rf.UpdatePing()
+			rf.UpdatePingWithLock()
 			reply.Term = currentTerm
 			reply.Success = true
 			log.Printf("in [term %d], [node %d] [AppendEntries received] heart beat, %d -> %d, current term: %d, next term: %d", currentTerm, rf.me, rf.leader, rf.me, currentTerm, args.Term)
-			rf.UpdateTerm(args.Term)
 			return
 		}
 		log.Printf("in [term %d], [node %d] reject heart beat, %d -> %d, current term: %d, next term: %d", currentTerm, rf.me, args.LeaderId, rf.me, currentTerm, args.Term)
@@ -345,32 +360,63 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.voteMutex.Lock()
 	defer rf.voteMutex.Unlock()
-	currentTerm, _ := rf.GetState()
+	currentTerm := rf.GetCurrentTerm()
 	log.Printf("in [term %d], [node %d] [RequestVote received] %v", currentTerm, rf.me, args)
-	reply.Term = currentTerm
-	if args.Term < currentTerm {
+
+	if args.Term <= currentTerm {
 		reply.VoteGranted = false
-		log.Printf("in [term %d], [node %d] reject voted for %d, curretn term %d > vote %d", currentTerm, rf.me, args.CandidateId, currentTerm, args.Term)
+		log.Printf("in [term %d], [node %d] reject voted for %d, curretn term %d >= vote term %d", currentTerm, rf.me, args.CandidateId, currentTerm, args.Term)
 		return
 	}
+
+	reply.Term = currentTerm
 
 	//higher one
 	if args.Term > currentTerm {
-		log.Printf("in [term %d -> term %d], [node %d] voted for %d, term: %d", currentTerm, args.Term, rf.me, args.CandidateId, args.Term)
-		reply.VoteGranted = true
-		rf.UpdateTerm(args.Term)
-		rf.UpdatePing()
-		rf.UpdateVotedFor(args.CandidateId)
-	}
 
-	// same one
-	votedFor := rf.GetCurrentVotedFor()
-	if votedFor != -1 {
-		reply.VoteGranted = false
-		log.Printf("in [term %d], [node %d] reject voted for %d, already voted for %d", currentTerm, rf.me, args.CandidateId, votedFor)
+		rf.statusChangeMutex.Lock()
+		defer rf.statusChangeMutex.Unlock()
+
+		currentTermInLock := rf.GetCurrentTerm()
+		if args.Term <= currentTermInLock {
+			log.Printf("in [term %d], [node %d] reject voted for %d, curretn term %d > vote term %d", currentTermInLock, rf.me, args.CandidateId, currentTermInLock, args.Term)
+			return
+		}
+
+		log.Printf("in [term %d -> term %d], [node %d] voted for %d, term: %d", currentTermInLock, args.Term, rf.me, args.CandidateId, args.Term)
+
+		rf.UpdateTerm(args.Term)
+		rf.UpdateVotedFor(args.CandidateId)
+		rf.UpdatePingWithLock()
+
+		// update status
+		reply.VoteGranted = true
+		reply.Term = currentTermInLock
 		return
 	}
 
+	// same one
+	//votedFor := rf.GetCurrentVotedFor()
+	//if votedFor != -1 {
+	//	reply.VoteGranted = false
+	//	log.Printf("in [term %d], [node %d] reject voted for %d, already voted for %d", currentTerm, rf.me, args.CandidateId, votedFor)
+	//	return
+	//}
+
+	// vote for
+	//rf.statusChangeMutex.Lock()
+	//defer rf.statusChangeMutex.Unlock()
+	//
+	//currentTermInLock := rf.GetCurrentTerm()
+	//if args.Term <= currentTermInLock {
+	//	log.Printf("in [term %d], [node %d] reject voted for %d, curretn term %d > vote term %d", currentTermInLock, rf.me, args.CandidateId, currentTermInLock, args.Term)
+	//	return
+	//}
+	//
+	//rf.UpdateVotedFor(args.CandidateId)
+	//log.Printf("in [term %d -> term %d], [node %d] voted for %d, term: %d", currentTermInLock, args.Term, rf.me, args.CandidateId, args.Term)
+	//reply.VoteGranted = true
+	//reply.Term = currentTermInLock
 }
 
 func Max(a, b int) int {
@@ -398,18 +444,22 @@ func (rf *Raft) IncrementTerm() {
 }
 
 func (rf *Raft) GetDurationSinceLastPing() time.Duration {
-	rf.pingMutex.Lock()
-	defer rf.pingMutex.Unlock()
 	return time.Now().Sub(rf.lastPing)
 }
 
-func (rf *Raft) UpdatePing() {
+func (rf *Raft) UpdatePingWithLock() {
 	rf.pingMutex.Lock()
 	defer rf.pingMutex.Unlock()
-	rf.lastPing = time.Now()
+	rf.UpdatePing()
 }
 
-func AtomicLoadInt(addr *int32) int{
+func (rf *Raft) UpdatePing() {
+	rf.lastPing = time.Now()
+	rf.pingTimeout = time.Duration(GetRandomBetween(100, 300)) * time.Millisecond
+}
+
+
+func AtomicLoadInt(addr *int32) int {
 	return int(atomic.LoadInt32(addr))
 }
 

@@ -70,13 +70,20 @@ type Raft struct {
 	votedFor    int32
 	currentTerm int32
 
-	role            int // 0 follower, 1 candidate, 2 leader
-	roleChangeMutex sync.Mutex
-	voteMutex       sync.Mutex
-	pingMutex       sync.Mutex
+	role int // 0 follower, 1 candidate, 2 leader
 
-	lastPing time.Time
-	uuid     string
+	// use to make consistence.
+	statusChangeMutex sync.Mutex
+
+	// control only deal one vote request once time
+	voteMutex sync.Mutex
+
+	// used to update and read ping time
+	pingMutex sync.Mutex
+
+	lastPing    time.Time
+	pingTimeout time.Duration
+	uuid        string
 }
 
 // return currentTerm and whether this server
@@ -87,6 +94,10 @@ func (rf *Raft) GetState() (int, bool) {
 
 func (rf *Raft) GetCurrentLeader() int {
 	return int(atomic.LoadInt32(&rf.leader))
+}
+
+func (rf *Raft) IsLeader() bool {
+	return rf.GetCurrentLeader() == rf.me
 }
 
 func (rf *Raft) GetCurrentTerm() int {
@@ -235,33 +246,23 @@ func (rf *Raft) killed() bool {
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
 
-		if currentTerm, isLeader := rf.GetState(); !isLeader {
-			currentLeader := rf.GetCurrentLeader()
-			if currentLeader == -1 {
-				log.Printf("Periodly check, in [term %d], [node %d] has not leader", currentTerm, rf.me)
-			} else {
-				log.Printf("Periodly check, in [term %d], [node %d] 's leader is %d", currentTerm, rf.me, currentLeader)
+		if !rf.IsLeader() {
+
+			if timeout := rf.WaitingForPingTimeout(); !timeout {
+				continue
 			}
 
-			rf.WaitingForTimeout()
-
-			//log.Printf("in [term %d], [node %d] long time no hear from leader %d", currentTerm, rf.me, rf.leader)
-			//	need a election
-
-			rf.DoElection()
-			//currentTerm, _ := rf.GetState()
-			//log.Printf("in [term %d] election finished, [node %d] result is %v, [uuid %s]", currentTerm, rf.me, win, rf.uuid)
+			win := rf.DoElection()
+			if !win {
+				randomSleepMilli := GetRandomBetween(100, 300)
+				time.Sleep(time.Duration(randomSleepMilli) * time.Millisecond)
+			}
 
 		} else {
-			//	send heart beat
+
 			rf.startSendHeartBeat()
+
 		}
-
-		// Your code here to check if a leader election should
-		// be started and to randomize sleeping time using
-		// time.Sleep().
-
-		//	检查是否和 leader 通讯良好
 
 	}
 
@@ -285,11 +286,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
-	rf.votedFor = -1
-	rf.currentTerm = 0
-	rf.leader = -1
-	rf.lastPing = time.Now()
 	rf.uuid = uuid.NewV4().String()
+	rf.UpdateVotedFor(-1)
+	rf.UpdateTerm(0)
+	rf.UpdateLeader(-1)
+	rf.UpdatePingWithLock()
 
 	log.Printf("created raft [node %d], [uuid: %s]", rf.me, rf.uuid)
 
