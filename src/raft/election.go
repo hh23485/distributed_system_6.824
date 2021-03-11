@@ -48,13 +48,13 @@ func (rf *Raft) SetAsCandidate() bool {
 	return true
 }
 
-func (rf *Raft) SetAsFollowerWithLock(term int, leader int) {
+func (rf *Raft) SetAsFollowerWithLock(term int, leader int) bool {
 	rf.statusChangeMutex.Lock()
 	defer rf.statusChangeMutex.Unlock()
 
 	if term < rf.GetCurrentTerm() {
 		log.Printf("in [term %d], [node %d] failed to set as follower, target %d less than current term %d", rf.currentTerm, rf.me, rf.GetCurrentTerm(), term)
-		return
+		return false
 	}
 
 	if term != rf.GetCurrentTerm() || leader != rf.GetCurrentLeader() {
@@ -65,6 +65,7 @@ func (rf *Raft) SetAsFollowerWithLock(term int, leader int) {
 	rf.UpdateVotedFor(leader)
 	rf.UpdateTerm(term)
 	rf.UpdateLeader(leader)
+	return true
 }
 
 func (rf *Raft) DoElection() bool {
@@ -97,13 +98,13 @@ func (rf *Raft) DoElection() bool {
 	voteJobCtx := &VoteJobContext{
 		&args,
 		map[int]*RequestVoteReply{},
-		0,
+		int32(args.Term),
 		&sync.Mutex{},
 	}
 
 	electionTimeoutMilli := GetRandomBetween(100, 500)
 	notTimeout, isWin := RunJobWithTimeLimit(electionTimeoutMilli, func() bool {
-		log.Printf("in [term %d], [node %d] start a election *******************", currentTerm, rf.me)
+		log.Printf("in [term %d], [node %d] 🏁 start a election *******************", currentTerm, rf.me)
 		reqContext := voteJobCtx
 		waitGroup := sync.WaitGroup{}
 
@@ -136,7 +137,7 @@ func (rf *Raft) DoElection() bool {
 				})
 
 				if !nTimeout {
-					log.Printf("[Async] in [term %d], [node %d] sendRequestVote %d -> %d, timeout", args.Term, rf.me, rf.me, idx)
+					log.Printf("[Async] in [term %d], [node %d] ⚠️️ sendRequestVote %d -> %d, timeout", args.Term, rf.me, rf.me, idx)
 				}
 			}(idx)
 		}
@@ -152,9 +153,13 @@ func (rf *Raft) DoElection() bool {
 		maxTerm := 0
 		maxTermNode := -1
 		for idx, _ := range rf.peers {
-			// todo reduce lock scope
+			if idx == rf.me {
+				granted++
+				continue
+			}
 			reply := reqContext.GetReply(idx)
 			if reply == nil {
+				log.Printf("[Async] in [term %d], [candidate %d] ↪️⚠️️ not recevied vote request from node %d", args.Term, rf.me, idx)
 				continue
 			}
 			if reply.VoteGranted {
@@ -169,7 +174,7 @@ func (rf *Raft) DoElection() bool {
 
 		// check if meet higher
 		if maxTerm > args.Term {
-			log.Printf("[Async] in [term %d], candidate %d meet higher term %d from peer %d", args.Term, rf.me, maxTerm, maxTermNode)
+			log.Printf("[Async] in [term %d], [candidate %d] ❌ meet higher term %d from peer %d", args.Term, rf.me, maxTerm, maxTermNode)
 			return false
 		}
 
@@ -178,25 +183,25 @@ func (rf *Raft) DoElection() bool {
 		if !isWin {
 			result = "lose"
 		}
-		log.Printf("[Async] %s the election for candidate %d in [term %d], win %d/%d", result, rf.me, args.Term, granted, totalCount)
+		log.Printf("[Async] in [term %d], [candidate %d] %s the election, win %d/%d", args.Term, rf.me, result, granted, totalCount)
 		return isWin
 	})
 
 	cCurrentTerm := rf.GetCurrentTerm()
 	if !notTimeout {
-		log.Printf("in [term %d], election for candidate %d, timeout ********************", args.Term, rf.me)
+		log.Printf("in [term %d], 🏳️ election for [candidate %d], timeout ********************", args.Term, rf.me)
 	} else if args.Term < cCurrentTerm {
-		log.Printf("in [term %d], [node %d]'s current term changed to %d during election ********************", args.Term, rf.me, cCurrentTerm)
+		log.Printf("in [term %d], [node %d] 🏳️ 's current term changed to %d during election ********************", args.Term, rf.me, cCurrentTerm)
 	} else {
 		//	valid
 		if isWin {
 			if rf.SetAsLeader() {
-				log.Printf("in [term %d], [node %d] win the election ********************", cCurrentTerm, rf.me)
+				log.Printf("in [term %d], [node %d] 🚩 win the election ********************", cCurrentTerm, rf.me)
 				return true
 			}
 			log.Printf("in [term %d], [node %d] set as leader failed ********************", cCurrentTerm, rf.me)
 		} else {
-			log.Printf("in [term %d], [node %d] lose the election for candidate ********************", cCurrentTerm, rf.me)
+			log.Printf("in [term %d], [node %d] 🏳️ lose the election for candidate ********************", cCurrentTerm, rf.me)
 		}
 	}
 
@@ -221,7 +226,7 @@ func (rf *Raft) IsLeaderConnected(verbose bool) bool {
 
 	if timeAfterLastPing >= rf.pingTimeout {
 		if verbose {
-			log.Printf("in [term %d], [node %d] long time no hear from leader %d, timeAfterLastPing: %d millisec", currentTerm, rf.me, rf.leader, timeAfterLastPing.Milliseconds())
+			log.Printf("in [term %d], [node %d] long time no hear from leader %d, timeAfterLastPing: %d millisec", currentTerm, rf.me, rf.GetCurrentLeader(), timeAfterLastPing.Milliseconds())
 		}
 		return false
 	}
@@ -252,13 +257,24 @@ func GetRandomBetween(min, max int64) int64 {
 func (rf *Raft) startSendHeartBeat() {
 	for rf.killed() == false {
 		waitGroup := sync.WaitGroup{}
-		replyMap := map[int]*AppendEntriesReply{}
-		mapMutex := sync.Mutex{}
 
 		currentTerm, isLeader := rf.GetState()
 		if !isLeader {
 			log.Printf("in [term %d], [node %d] is not leader now, stop send heart beat, new leader: %d", currentTerm, rf.me, rf.GetCurrentLeader())
 			return
+		}
+
+		args := &AppendEntriesArgs{}
+		args.Term = rf.GetCurrentTerm()
+		args.LeaderId = rf.me
+
+		jobContext := &AppendEntriesJobContext{
+			ReplyMap{
+				replyMap: map[int]interface{}{},
+				mutex:    &sync.Mutex{},
+			},
+			int32(args.Term),
+			args,
 		}
 
 		for idx, _ := range rf.peers {
@@ -268,17 +284,11 @@ func (rf *Raft) startSendHeartBeat() {
 				if idx == rf.me {
 					return
 				}
-				currentReply := replyMap[idx]
-				{
-					mapMutex.Lock()
-					defer mapMutex.Unlock()
-					currentReply = &AppendEntriesReply{}
-				}
 
 				currentTermWhenSendingHeartBeat, isLeader := rf.GetState()
 				// quick fail
 				if !isLeader {
-					log.Printf("in [term %d -> %d], [node %d] is not leader now, stop send heart beat, new leader: %d", currentTerm, currentTermWhenSendingHeartBeat, rf.me, rf.GetCurrentLeader())
+					log.Printf("in [term %d -> %d], [node %d] ⛔️ is not leader now, stop send heart beat, new leader: %d", currentTerm, currentTermWhenSendingHeartBeat, rf.me, rf.GetCurrentLeader())
 					return
 				}
 				if rf.killed() {
@@ -286,16 +296,17 @@ func (rf *Raft) startSendHeartBeat() {
 					return
 				}
 
-				log.Printf("in [term %d], [node %d] [StartSendHeartBeat] send heart beat from leader: %d -> %d, isLeader: %v, term: %d", currentTermWhenSendingHeartBeat, rf.me, rf.me, idx, isLeader, currentTermWhenSendingHeartBeat)
-				args := &AppendEntriesArgs{}
-				args.Term = currentTermWhenSendingHeartBeat
-				args.LeaderId = rf.me
+				log.Printf("in [term %d], [node %d] [StartSendHeartBeat] ➡️ send heart beat from leader: %d -> %d, isLeader: %v, term: %d", currentTermWhenSendingHeartBeat, rf.me, rf.me, idx, isLeader, currentTermWhenSendingHeartBeat)
+
 				notTimeout, _ := RunJobWithTimeLimit(rpcTimeout.Milliseconds(), func() bool {
-					return rf.sendHeartBeat(idx, args, currentReply)
+					reply:=&AppendEntriesReply{}
+					res := rf.sendHeartBeat(idx, args, reply)
+					jobContext.ReplyMap.SetReplyWithLock(idx, reply)
+					return res
 				})
 				cCurrentTerm := rf.GetCurrentTerm()
 				if !notTimeout {
-					log.Printf("in [term %d], [node %d] send heart beat to node %d timeout", cCurrentTerm, rf.me, idx)
+					log.Printf("in [term %d], [node %d] ❌ send heart beat to node %d timeout", cCurrentTerm, rf.me, idx)
 				}
 
 			}(idx)
@@ -303,18 +314,29 @@ func (rf *Raft) startSendHeartBeat() {
 		waitGroup.Wait()
 
 		if rf.GetCurrentLeader() != rf.me {
-			log.Printf("in [term %d], [node %d] is not leader now, stop send heart beat, new leader: %d", rf.GetCurrentTerm(), rf.me, rf.leader)
+			log.Printf("in [term %d], [node %d] ⛔️ is not leader now, stop send heart beat, new leader: %d", rf.GetCurrentTerm(), rf.me, rf.leader)
 			return
 		}
 
 		cCurrentTerm := rf.GetCurrentTerm()
-		for idx, reply := range replyMap {
-			mapMutex.Lock()
-			if reply.Term > cCurrentTerm {
-				log.Printf("in [term %d], [node %d] send heart beat met higher term from node %d, back to follower", cCurrentTerm, rf.me, idx)
-				rf.SetAsFollowerWithLock(reply.Term, -1)
+		for idx, _ := range rf.peers {
+			if idx == rf.me {
+				continue
 			}
-			mapMutex.Unlock()
+			reply := jobContext.GetReply(idx)
+			if reply == nil {
+				log.Printf("in [term %d], [node %d] ↪️⚠️️ not received reject heart beat from node %d", cCurrentTerm, rf.me, idx)
+				continue
+			}
+			replyContext := reply.(*AppendEntriesReply)
+			if replyContext.Term > cCurrentTerm {
+				log.Printf("in [term %d], [node %d] ↪️ send heart beat met higher term from node %d, back to follower", cCurrentTerm, rf.me, idx)
+				rf.SetAsFollowerWithLock(replyContext.Term, -1)
+				return
+			}
+			if !replyContext.Success {
+				log.Printf("in [term %d], [node %d] ↪️ received reject heart beat from node %d", cCurrentTerm, rf.me, idx)
+			}
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -336,24 +358,30 @@ func (rf *Raft) UpdateTerm(term int) {
 //}
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	currentTerm, _ := rf.GetState()
+	currentTerm := rf.GetCurrentTerm()
 	if len(args.Entries) == 0 {
 		if currentTerm <= args.Term {
-			// todo load lock
-			rf.SetAsFollowerWithLock(args.Term, args.LeaderId)
+			// if failed to be the follower, stop next actions
+			if !rf.SetAsFollowerWithLock(args.Term, args.LeaderId) {
+				reply.Success = false
+				reply.Term = rf.GetCurrentTerm()
+				log.Printf("in [term %d], [node %d] ⬅️ reject heart beat, current term: %d > heart term: %d", rf.GetCurrentTerm(), rf.me, rf.GetCurrentTerm(), args.Term)
+				return
+			}
 			//rf.heartBeatMutex.Lock()
 			//defer rf.heartBeatMutex.Unlock()
 			rf.UpdatePingWithLock()
-			reply.Term = currentTerm
+			reply.Term = rf.GetCurrentTerm()
 			reply.Success = true
-			log.Printf("in [term %d], [node %d] [AppendEntries received] heart beat, %d -> %d, current term: %d, next term: %d", currentTerm, rf.me, rf.leader, rf.me, currentTerm, args.Term)
+			log.Printf("in [term %d], [node %d] ⬅️👌 [AppendEntries received] heart beat, %d -> %d, current term: %d, next term: %d", currentTerm, rf.me, currentTerm, rf.me, reply.Term, args.Term)
 			return
 		}
-		log.Printf("in [term %d], [node %d] reject heart beat, %d -> %d, current term: %d, next term: %d", currentTerm, rf.me, args.LeaderId, rf.me, currentTerm, args.Term)
+		currentTerm = rf.GetCurrentTerm()
+		log.Printf("in [term %d], [node %d] ⬅️ reject heart beat, current term: %d > heart term: %d", currentTerm, rf.me, currentTerm, args.Term)
 	}
 
-	reply.Term = currentTerm
 	reply.Success = false
+	reply.Term = rf.GetCurrentTerm()
 }
 
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
@@ -361,11 +389,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.voteMutex.Lock()
 	defer rf.voteMutex.Unlock()
 	currentTerm := rf.GetCurrentTerm()
-	log.Printf("in [term %d], [node %d] [RequestVote received] %v", currentTerm, rf.me, args)
+	log.Printf("in [term %d], [node %d] [RequestVote received] ⬅️ %v", currentTerm, rf.me, args)
 
 	if args.Term <= currentTerm {
 		reply.VoteGranted = false
-		log.Printf("in [term %d], [node %d] reject voted for %d, curretn term %d >= vote term %d", currentTerm, rf.me, args.CandidateId, currentTerm, args.Term)
+		log.Printf("in [term %d], [node %d] ⬅️ reject voted for %d, curretn term %d >= vote term %d", currentTerm, rf.me, args.CandidateId, currentTerm, args.Term)
 		return
 	}
 
@@ -379,11 +407,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 		currentTermInLock := rf.GetCurrentTerm()
 		if args.Term <= currentTermInLock {
-			log.Printf("in [term %d], [node %d] reject voted for %d, curretn term %d > vote term %d", currentTermInLock, rf.me, args.CandidateId, currentTermInLock, args.Term)
+			log.Printf("in [term %d], [node %d] ⬅️ reject voted for %d, curretn term %d > vote term %d", currentTermInLock, rf.me, args.CandidateId, currentTermInLock, args.Term)
 			return
 		}
 
-		log.Printf("in [term %d -> term %d], [node %d] voted for %d, term: %d", currentTermInLock, args.Term, rf.me, args.CandidateId, args.Term)
+		log.Printf("in [term %d -> term %d], [node %d] ⬅️👍 voted for %d, term: %d", currentTermInLock, args.Term, rf.me, args.CandidateId, args.Term)
 
 		rf.UpdateTerm(args.Term)
 		rf.UpdateVotedFor(args.CandidateId)

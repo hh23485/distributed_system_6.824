@@ -11,6 +11,23 @@ import (
 //GetResult() interface{}
 //}
 
+type ReplyMap struct {
+	replyMap map[int]interface{}
+	mutex    *sync.Mutex
+}
+
+func (ctx *ReplyMap) SetReplyWithLock(idx int, reply interface{}) {
+	ctx.mutex.Lock()
+	defer ctx.mutex.Unlock()
+	ctx.replyMap[idx] = reply
+}
+
+func (ctx *ReplyMap) GetReply(idx int) interface{} {
+	ctx.mutex.Lock()
+	defer ctx.mutex.Unlock()
+	return ctx.replyMap[idx]
+}
+
 type VoteJobContext struct {
 	args     *RequestVoteArgs
 	replyMap map[int]*RequestVoteReply
@@ -18,9 +35,10 @@ type VoteJobContext struct {
 	mutex    *sync.Mutex
 }
 
-type AppendLogContext struct {
-	replyMap map[int]*AppendEntriesReply
-	mutex    *sync.Mutex
+type AppendEntriesJobContext struct {
+	ReplyMap
+	MaxTerm int32
+	args *AppendEntriesArgs
 }
 
 func (ctx *VoteJobContext) SetReplyWithLock(idx int, reply *RequestVoteReply) {
