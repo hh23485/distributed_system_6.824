@@ -422,29 +422,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.Term = currentTermInLock
 		return
 	}
-
-	// same one
-	//votedFor := rf.GetCurrentVotedFor()
-	//if votedFor != -1 {
-	//	reply.VoteGranted = false
-	//	log.Printf("in [term %d], [node %d] reject voted for %d, already voted for %d", currentTerm, rf.me, args.CandidateId, votedFor)
-	//	return
-	//}
-
-	// vote for
-	//rf.statusChangeMutex.Lock()
-	//defer rf.statusChangeMutex.Unlock()
-	//
-	//currentTermInLock := rf.GetCurrentTerm()
-	//if args.Term <= currentTermInLock {
-	//	log.Printf("in [term %d], [node %d] reject voted for %d, curretn term %d > vote term %d", currentTermInLock, rf.me, args.CandidateId, currentTermInLock, args.Term)
-	//	return
-	//}
-	//
-	//rf.UpdateVotedFor(args.CandidateId)
-	//log.Printf("in [term %d -> term %d], [node %d] voted for %d, term: %d", currentTermInLock, args.Term, rf.me, args.CandidateId, args.Term)
-	//reply.VoteGranted = true
-	//reply.Term = currentTermInLock
 }
 
 func Max(a, b int) int {
