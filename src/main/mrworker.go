@@ -3,14 +3,14 @@ package main
 //
 // start a worker process, which is implemented
 // in ../mr/worker.go. typically there will be
-// multiple worker processes, talking to one master.
+// multiple worker processes, talking to one coordinator.
 //
 // go run mrworker.go wc.so
 //
 // Please do not change this file.
 //
 
-import "../mr"
+import "6.824/mr"
 import "plugin"
 import "os"
 import "fmt"
@@ -22,7 +22,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("mrworker begin\n")
 	mapf, reducef := loadPlugin(os.Args[1])
 
 	mr.Worker(mapf, reducef)
@@ -35,7 +34,7 @@ func main() {
 func loadPlugin(filename string) (func(string, string) []mr.KeyValue, func(string, []string) string) {
 	p, err := plugin.Open(filename)
 	if err != nil {
-		log.Fatalf("cannot load plugin %v, err=%v", filename, err)
+		log.Fatalf("cannot load plugin %v", filename)
 	}
 	xmapf, err := p.Lookup("Map")
 	if err != nil {
