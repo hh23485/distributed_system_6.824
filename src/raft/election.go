@@ -196,7 +196,7 @@ func (rf *Raft) DoElection() bool {
 		//	valid
 		if isWin {
 			if rf.SetAsLeader() {
-				log.Printf("in [term %d], [node %d] 🚩 win the election ********************", cCurrentTerm, rf.me)
+				log.Printf("in [term %d], [node %d] 👑 win the election ********************", cCurrentTerm, rf.me)
 				return true
 			}
 			log.Printf("in [term %d], [node %d] set as leader failed ********************", cCurrentTerm, rf.me)
@@ -313,8 +313,8 @@ func (rf *Raft) startSendHeartBeat() {
 		}
 		waitGroup.Wait()
 
-		if rf.GetCurrentLeader() != rf.me {
-			log.Printf("in [term %d], [node %d] ⛔️ is not leader now, stop send heart beat, new leader: %d", rf.GetCurrentTerm(), rf.me, rf.leader)
+		if !rf.IsLeader() {
+			log.Printf("in [term %d], [node %d] ⛔️ is not leader now, stop send heart beat, new leader: %d", rf.GetCurrentTerm(), rf.me, rf.GetCurrentLeader())
 			return
 		}
 
